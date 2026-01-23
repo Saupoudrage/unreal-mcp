@@ -13,6 +13,7 @@
 #include "Commands/AnimationCommandRegistration.h"
 #include "Commands/StateTreeCommandRegistration.h"
 #include "Commands/SoundCommandRegistration.h"
+#include "Commands/Migration/MigrationCommandRegistration.h"
 #include "Services/BlueprintActionService.h"
 // Legacy adapter removed
 #include "Services/BlueprintService.h"
@@ -130,6 +131,9 @@ void FUnrealMCPMainDispatcher::RegisterAllCommands()
     // Register Sound/Audio commands
     FSoundCommandRegistration::RegisterAllCommands();
 
+    // Register Migration commands (Blueprint-to-C++ migration tools)
+    FMigrationCommandRegistration::RegisterAllMigrationCommands();
+
     UE_LOG(LogTemp, Log, TEXT("FUnrealMCPMainDispatcher::RegisterAllCommands: All command types registered"));
 }
 
@@ -174,6 +178,7 @@ void FUnrealMCPMainDispatcher::Shutdown()
     FNiagaraCommandRegistration::UnregisterAllCommands();
     FAnimationCommandRegistration::UnregisterAllAnimationCommands();
     FStateTreeCommandRegistration::UnregisterAllStateTreeCommands();
+    FMigrationCommandRegistration::UnregisterAllMigrationCommands();
 
     // Clear the entire registry
     FUnrealMCPCommandRegistry::Get().ClearRegistry();
