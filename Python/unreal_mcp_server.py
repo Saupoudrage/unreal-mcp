@@ -271,13 +271,15 @@ from tools.blueprint_tools import register_blueprint_tools
 from tools.node_tools import register_blueprint_node_tools
 from tools.project_tools import register_project_tools
 from tools.umg_tools import register_umg_tools
+from tools.migration_tools import register_migration_tools
 
 # Register tools
 register_editor_tools(mcp)
 register_blueprint_tools(mcp)
 register_blueprint_node_tools(mcp)
 register_project_tools(mcp)
-register_umg_tools(mcp)  
+register_umg_tools(mcp)
+register_migration_tools(mcp)  
 
 @mcp.prompt()
 def info():
@@ -334,7 +336,17 @@ def info():
     
     ## Project Tools
     - `create_input_mapping(action_name, key, input_type)` - Create input mappings
-    
+
+    ## Blueprint Migration Tools
+    - `export_blueprint_graph(blueprint_path, graph_name, include_components, include_defaults)`
+      Export complete Blueprint graph to JSON file (output in Saved/UnrealMCP/Exports/)
+    - `get_blueprint_dependencies(blueprint_path, include_engine_classes, recursive)`
+      Get all dependencies of a Blueprint (assets, classes, functions with call counts)
+    - `find_blueprint_references(target_path, target_function, search_scope, include_soft_references)`
+      Find all assets/Blueprints that reference a given Blueprint or function
+    - `redirect_function_call(source_blueprint, source_function, target_class, target_function, dry_run, backup)`
+      Redirect function calls from Blueprint to C++ (use dry_run=True first to preview)
+
     ## Best Practices
     
     ### UMG Widget Development
@@ -369,6 +381,15 @@ def info():
     - Log important operations
     - Validate parameters
     - Clean up resources on errors
+
+    ### Blueprint Migration Workflow
+    - Use `export_blueprint_graph` to analyze Blueprint structure before migration
+    - Use `get_blueprint_dependencies` to understand what a Blueprint depends on
+    - Use `find_blueprint_references` to find all places that need updating
+    - Always use `redirect_function_call` with `dry_run=True` first to preview changes
+    - Enable backup when applying redirects to allow rollback
+    - Compile affected Blueprints after making changes
+    - Test thoroughly after migration
     """
 
 # Run the server

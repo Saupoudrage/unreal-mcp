@@ -57,6 +57,7 @@
 #include "Commands/UnrealMCPProjectCommands.h"
 #include "Commands/UnrealMCPCommonUtils.h"
 #include "Commands/UnrealMCPUMGCommands.h"
+#include "Commands/UnrealMCPBlueprintMigrationCommands.h"
 
 // Default settings
 #define MCP_SERVER_HOST "127.0.0.1"
@@ -69,6 +70,7 @@ UUnrealMCPBridge::UUnrealMCPBridge()
     BlueprintNodeCommands = MakeShared<FUnrealMCPBlueprintNodeCommands>();
     ProjectCommands = MakeShared<FUnrealMCPProjectCommands>();
     UMGCommands = MakeShared<FUnrealMCPUMGCommands>();
+    MigrationCommands = MakeShared<FUnrealMCPBlueprintMigrationCommands>();
 }
 
 UUnrealMCPBridge::~UUnrealMCPBridge()
@@ -78,6 +80,7 @@ UUnrealMCPBridge::~UUnrealMCPBridge()
     BlueprintNodeCommands.Reset();
     ProjectCommands.Reset();
     UMGCommands.Reset();
+    MigrationCommands.Reset();
 }
 
 // Initialize subsystem
@@ -277,6 +280,17 @@ FString UUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const TShar
                      CommandType == TEXT("add_widget_to_viewport"))
             {
                 ResultJson = UMGCommands->HandleCommand(CommandType, Params);
+            }
+            // Blueprint Migration Commands
+            else if (CommandType == TEXT("export_blueprint_graph") ||
+                     CommandType == TEXT("get_blueprint_dependencies") ||
+                     CommandType == TEXT("find_blueprint_references") ||
+                     CommandType == TEXT("redirect_function_call") ||
+                     CommandType == TEXT("delete_blueprint_function") ||
+                     CommandType == TEXT("set_blueprint_parent_class") ||
+                     CommandType == TEXT("get_blueprint_functions"))
+            {
+                ResultJson = MigrationCommands->HandleCommand(CommandType, Params);
             }
             else
             {
