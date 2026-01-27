@@ -11,6 +11,7 @@
 #include "AnimationGraph.h"
 #include "AnimationStateMachineGraph.h"
 #include "AnimationStateGraph.h"
+#include "AnimGraphNode_StateResult.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/Kismet2NameValidators.h"
 
