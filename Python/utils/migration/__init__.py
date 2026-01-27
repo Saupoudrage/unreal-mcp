@@ -2,7 +2,7 @@
 Migration Utilities module for Blueprint-to-C++ conversion.
 
 This module provides helper functions for parsing Blueprint exports,
-generating codemaps, and creating C++ code.
+generating codemaps, creating C++ code, and redirecting function calls.
 """
 
 from .migration_utils import (
@@ -22,7 +22,17 @@ from .migration_utils import (
     get_migrations_dir,
 )
 
+from .redirect_operations import (
+    redirect_blueprint_function_calls,
+    redirect_single_node,
+    verify_no_external_references,
+    get_node_connections,
+    find_blueprint_function_calls,
+    apply_pin_mapping,
+)
+
 __all__ = [
+    # Migration utilities
     'CodemapBuilder',
     'CppGenerator',
     'find_latest_export',
@@ -37,4 +47,11 @@ __all__ = [
     'get_codemaps_dir',
     'get_generated_dir',
     'get_migrations_dir',
+    # Redirect operations
+    'redirect_blueprint_function_calls',
+    'redirect_single_node',
+    'verify_no_external_references',
+    'get_node_connections',
+    'find_blueprint_function_calls',
+    'apply_pin_mapping',
 ]
