@@ -1,13 +1,17 @@
 """
 Utilities for working with Unreal Engine connections.
 
-This module provides helper functions for common operations with Unreal Engine connections.
+SIMPLIFIED VERSION: All requests are serialized with a global lock.
+One request at a time - no concurrency, no race conditions.
 """
 
 import logging
 import socket
 import json
-from typing import Dict, List, Any, Optional
+import threading
+import os
+import datetime
+from typing import Dict, Any, Optional
 
 # Get logger
 logger = logging.getLogger("UnrealMCP")
@@ -16,301 +20,181 @@ logger = logging.getLogger("UnrealMCP")
 UNREAL_HOST = "127.0.0.1"
 UNREAL_PORT = 55557
 
-class UnrealConnection:
-    """Connection to an Unreal Engine instance."""
-    
-    def __init__(self):
-        """Initialize the connection."""
-        self.socket = None
-        self.connected = False
-    
-    def connect(self) -> bool:
-        """Connect to the Unreal Engine instance."""
-        try:
-            # Close any existing socket
-            if self.socket:
-                try:
-                    self.socket.close()
-                except:
-                    pass
-                self.socket = None
-            
-            logger.info(f"Connecting to Unreal at {UNREAL_HOST}:{UNREAL_PORT}...")
-            self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.socket.settimeout(8)  # 30 second timeout for complex operations
-            
-            # Set socket options for better stability
-            self.socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-            
-            # Set larger buffer sizes
-            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 65536)
-            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 65536)
-            
-            self.socket.connect((UNREAL_HOST, UNREAL_PORT))
-            self.connected = True
-            logger.info("Connected to Unreal Engine")
-            return True
-            
-        except socket.timeout:
-            logger.error(f"Connection timeout to Unreal Engine at {UNREAL_HOST}:{UNREAL_PORT}")
-            self.connected = False
-            return False
-        except ConnectionRefusedError:
-            logger.error(f"Connection refused by Unreal Engine at {UNREAL_HOST}:{UNREAL_PORT} - is Unreal Engine running?")
-            self.connected = False
-            return False
-        except Exception as e:
-            logger.error(f"Failed to connect to Unreal: {e}")
-            self.connected = False
-            return False
-    
-    def disconnect(self):
-        """Disconnect from the Unreal Engine instance."""
-        if self.socket:
-            try:
-                self.socket.close()
-            except:
-                pass
-        self.socket = None
-        self.connected = False
+# Debug log file
+_debug_log_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "mcp_debug.log")
 
-    def receive_full_response(self, sock, buffer_size=4096) -> bytes:
-        """Receive a complete response from Unreal, handling chunked data."""
-        chunks = []
-        sock.settimeout(30)  # 30 second timeout for complex operations
-        import os
-        debug_log_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tcp_debug.log")
-        
-        try:
-            import datetime
-            with open(debug_log_path, "a", encoding="utf-8") as f:
-                f.write(f"\n\n=== RECEIVE START: {datetime.datetime.now()} ===\n")
-            
-            while True:
-                try:
-                    with open(debug_log_path, "a", encoding="utf-8") as f:
-                        f.write(f"Calling sock.recv({buffer_size})...\n")
-                    
-                    chunk = sock.recv(buffer_size)
-                    
-                    with open(debug_log_path, "a", encoding="utf-8") as f:
-                        f.write(f"Received chunk: {len(chunk) if chunk else 0} bytes\n")
-                    
-                    if not chunk:
-                        if not chunks:
-                            with open(debug_log_path, "a", encoding="utf-8") as f:
-                                f.write("ERROR: Connection closed before receiving data\n")
-                            raise Exception("Connection closed before receiving data")
-                        with open(debug_log_path, "a", encoding="utf-8") as f:
-                            f.write("No more chunks, breaking...\n")
-                        break
-                    chunks.append(chunk)
-                    
-                    # Process the data received so far
-                    data = b''.join(chunks)
-                    decoded_data = data.decode('utf-8')
-                    
-                    with open(debug_log_path, "a", encoding="utf-8") as f:
-                        f.write(f"Total data so far: {len(data)} bytes\n")
-                        f.write(f"Decoded preview: {decoded_data[:200]}...\n")
-                    
-                    # Try to parse as JSON to check if complete
-                    try:
-                        json.loads(decoded_data)
-                        logger.info(f"Received complete response ({len(data)} bytes)")
-                        with open(debug_log_path, "a", encoding="utf-8") as f:
-                            f.write(f"SUCCESS: Complete JSON received!\n")
-                            f.write(f"Full response: {decoded_data}\n")
-                        return data
-                    except json.JSONDecodeError as je:
-                        # Not complete JSON yet, continue reading
-                        logger.debug(f"Received partial response, waiting for more data...")
-                        with open(debug_log_path, "a", encoding="utf-8") as f:
-                            f.write(f"Partial JSON (error: {je}), continuing...\n")
-                        continue
-                    except Exception as e:
-                        logger.warning(f"Error processing response chunk: {str(e)}")
-                        with open(debug_log_path, "a", encoding="utf-8") as f:
-                            f.write(f"ERROR processing chunk: {e}\n")
-                        continue
-                        
-                except socket.timeout as st:
-                    with open(debug_log_path, "a", encoding="utf-8") as f:
-                        f.write(f"SOCKET TIMEOUT in recv loop after {len(chunks)} chunks\n")
-                    raise st
-                except Exception as ex:
-                    with open(debug_log_path, "a", encoding="utf-8") as f:
-                        f.write(f"EXCEPTION in recv loop: {ex}\n")
-                    raise ex
-                    
-        except socket.timeout:
-            logger.warning(f"Socket timeout during receive after {len(chunks)} chunks")
-            with open(debug_log_path, "a", encoding="utf-8") as f:
-                f.write(f"TIMEOUT: After {len(chunks)} chunks\n")
-            if chunks:
-                # If we have some data already, try to use it
-                data = b''.join(chunks)
-                logger.info(f"Received {len(data)} bytes before timeout")
-                with open(debug_log_path, "a", encoding="utf-8") as f:
-                    f.write(f"Attempting to use partial data: {len(data)} bytes\n")
-                    f.write(f"Partial data: {data.decode('utf-8', errors='replace')}\n")
-                try:
-                    json.loads(data.decode('utf-8'))
-                    logger.info(f"Using partial response after timeout ({len(data)} bytes)")
-                    with open(debug_log_path, "a", encoding="utf-8") as f:
-                        f.write(f"SUCCESS: Partial data is valid JSON!\n")
-                    return data
-                except Exception as parse_error:
-                    logger.warning(f"Partial data is not valid JSON: {parse_error}")
-                    with open(debug_log_path, "a", encoding="utf-8") as f:
-                        f.write(f"ERROR: Partial data is not valid JSON: {parse_error}\n")
-            raise Exception(f"Timeout receiving Unreal response after 30 seconds (received {len(chunks)} chunks)")
-        except Exception as e:
-            logger.error(f"Error during receive: {str(e)}")
-            with open(debug_log_path, "a", encoding="utf-8") as f:
-                f.write(f"FATAL ERROR: {e}\n")
-            raise
-    
-    def send_command(self, command: str, params: Dict[str, Any] = None) -> Optional[Dict[str, Any]]:
-        """Send a command to Unreal Engine and get the response."""
-        # Always reconnect for each command, since Unreal closes the connection after each command
-        if self.socket:
-            try:
-                self.socket.close()
-            except:
-                pass
-            self.socket = None
-            self.connected = False
-        
-        if not self.connect():
-            logger.error("Failed to connect to Unreal Engine for command")
-            return None
-        
-        try:
-            # Match Unity's command format exactly
-            command_obj = {
-                "type": command,  # Use "type" instead of "command"
-                "params": params or {}  # Use Unity's params or {} pattern
-            }
-            
-            # Send without newline, exactly like Unity
-            command_json = json.dumps(command_obj)
-            logger.info(f"Sending command: {command_json}")
-            self.socket.sendall(command_json.encode('utf-8'))
-            
-            # Read response using improved handler
-            response_data = self.receive_full_response(self.socket)
-            response = json.loads(response_data.decode('utf-8'))
-            
-            # Log complete response for debugging
-            logger.info(f"Complete response from Unreal: {response}")
-            
-            # Always close the connection after command is complete
-            try:
-                self.socket.close()
-            except:
-                pass
-            self.socket = None
-            self.connected = False
-            
-            return response
-            
-        except Exception as e:
-            logger.error(f"Error sending command: {e}")
-            # Always reset connection state on any error
-            self.connected = False
-            try:
-                self.socket.close()
-            except:
-                pass
-            self.socket = None
-            return {
-                "status": "error",
-                "error": str(e)
-            }
-
-# Global connection state
-_unreal_connection: UnrealConnection = None
-
-def get_unreal_engine_connection():
-    """Get a connection to Unreal Engine."""
-    global _unreal_connection
+def _debug(msg: str):
+    """Write debug message to file with timestamp."""
     try:
-        if _unreal_connection is None:
-            _unreal_connection = UnrealConnection()
-        return _unreal_connection
+        with open(_debug_log_path, "a", encoding="utf-8") as f:
+            f.write(f"[{datetime.datetime.now()}] {msg}\n")
+            f.flush()
+    except:
+        pass
+
+# Global lock - only ONE request can be in-flight at a time
+_request_lock = threading.Lock()
+
+
+def _send_tcp_command(command_name: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Send a single TCP command to Unreal and wait for response.
+    This is the core function - no retries, no complexity.
+    """
+    sock = None
+    try:
+        _debug(f"TCP [{command_name}] Creating socket...")
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(30)  # 30 second timeout for everything
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+        _debug(f"TCP [{command_name}] Connecting to {UNREAL_HOST}:{UNREAL_PORT}...")
+        sock.connect((UNREAL_HOST, UNREAL_PORT))
+        _debug(f"TCP [{command_name}] Connected!")
+
+        # Send command
+        command_obj = {"type": command_name, "params": params or {}}
+        command_json = json.dumps(command_obj)
+        _debug(f"TCP [{command_name}] Sending {len(command_json)} bytes...")
+        sock.sendall(command_json.encode('utf-8'))
+        _debug(f"TCP [{command_name}] Sent! Waiting for response...")
+
+        # Receive response - simple blocking recv until we get complete JSON
+        chunks = []
+        recv_count = 0
+        while True:
+            recv_count += 1
+            _debug(f"TCP [{command_name}] recv() call #{recv_count}...")
+            chunk = sock.recv(8192)
+            _debug(f"TCP [{command_name}] recv() returned {len(chunk) if chunk else 0} bytes")
+
+            if not chunk:
+                _debug(f"TCP [{command_name}] Connection closed by server")
+                break
+            chunks.append(chunk)
+
+            # Try to parse as JSON - if successful, we have complete response
+            data = b''.join(chunks)
+            try:
+                response = json.loads(data.decode('utf-8'))
+                _debug(f"TCP [{command_name}] SUCCESS! Got complete JSON ({len(data)} bytes)")
+                return response
+            except json.JSONDecodeError:
+                _debug(f"TCP [{command_name}] Partial JSON ({len(data)} bytes), continuing...")
+                continue
+
+        # If we get here, connection closed before complete JSON
+        _debug(f"TCP [{command_name}] Connection closed, checking if we have complete data...")
+        if chunks:
+            data = b''.join(chunks)
+            try:
+                response = json.loads(data.decode('utf-8'))
+                _debug(f"TCP [{command_name}] SUCCESS after close ({len(data)} bytes)")
+                return response
+            except:
+                _debug(f"TCP [{command_name}] FAILED - incomplete JSON after close")
+                pass
+
+        _debug(f"TCP [{command_name}] FAILED - no complete response")
+        return {"status": "error", "error": "Connection closed before complete response"}
+
+    except socket.timeout:
+        _debug(f"TCP [{command_name}] TIMEOUT!")
+        return {"status": "error", "error": "Connection timeout"}
+    except ConnectionRefusedError:
+        _debug(f"TCP [{command_name}] CONNECTION REFUSED!")
+        return {"status": "error", "error": "Connection refused - is Unreal Engine running?"}
     except Exception as e:
-        logger.error(f"Error getting Unreal connection: {e}")
-        return None
+        _debug(f"TCP [{command_name}] EXCEPTION: {e}")
+        return {"status": "error", "error": str(e)}
+    finally:
+        _debug(f"TCP [{command_name}] Closing socket...")
+        if sock:
+            try:
+                sock.close()
+            except:
+                pass
+        _debug(f"TCP [{command_name}] Socket closed")
+
 
 def send_unreal_command(command_name: str, params: Dict[str, Any]) -> Dict[str, Any]:
-    """Send a command to Unreal Engine with proper error handling."""
+    """
+    Send a command to Unreal Engine.
+
+    IMPORTANT: This function is serialized - only one request at a time.
+    If multiple threads call this, they will queue up and execute one by one.
+    """
+    _debug(f"QUEUE [{command_name}] Entered send_unreal_command")
+    _debug(f"QUEUE [{command_name}] Waiting for lock...")
+
+    # Try to acquire lock with timeout to detect deadlocks
+    acquired = _request_lock.acquire(timeout=60)
+    if not acquired:
+        _debug(f"QUEUE [{command_name}] DEADLOCK! Could not acquire lock after 60s")
+        return {"status": "error", "error": "Request queue deadlock - lock not released by previous request"}
+
+    _debug(f"QUEUE [{command_name}] Got lock!")
+
     try:
-        unreal = get_unreal_engine_connection()
-        if not unreal:
-            return {"status": "error", "error": "Failed to connect to Unreal Engine"}
-        
-        logger.info(f"Sending command '{command_name}' with params: {params}")
-        response = unreal.send_command(command_name, params)
-        
-        if not response:
-            logger.error(f"No response from Unreal Engine for command '{command_name}'")
-            return {"status": "error", "error": "No response from Unreal Engine"}
-        
-        logger.info(f"Command '{command_name}' response: {response}")
-        
-        # Handle nested error objects from C++ MCPErrorHandler
+        _debug(f"QUEUE [{command_name}] Calling _send_tcp_command...")
+
+        # Simple retry: try up to 2 times
+        for attempt in range(2):
+            response = _send_tcp_command(command_name, params)
+
+            # Check if it's an error we should retry
+            if response.get("status") == "error":
+                error = response.get("error", "")
+                if attempt == 0 and ("timeout" in error.lower() or "refused" in error.lower()):
+                    logger.warning(f"Retrying after error: {error}")
+                    import time
+                    time.sleep(0.5)
+                    continue
+
+            # Success or non-retryable error
+            break
+
+        # Handle nested error format from C++ MCPErrorHandler
         if response.get("success") is False:
             error_field = response.get("error")
-            error_message = "Unknown Unreal error"
-            
             if isinstance(error_field, dict):
-                # This is a nested error object from C++ MCPErrorHandler
-                # Extract the actual error message from the nested structure
-                error_message = (error_field.get("errorMessage") or 
-                               error_field.get("errorDetails") or 
-                               error_field.get("message") or 
-                               "Unknown nested error")
-                logger.error(f"Unreal nested error: {error_message}")
+                error_message = (error_field.get("errorMessage") or
+                               error_field.get("errorDetails") or
+                               error_field.get("message") or
+                               "Unknown error")
+                return {"status": "error", "error": error_message}
             elif isinstance(error_field, str):
-                # Simple string error message
-                error_message = error_field
-                logger.error(f"Unreal string error: {error_message}")
+                return {"status": "error", "error": error_field}
             else:
-                # Fallback to message field or default
-                error_message = response.get("message", "Unknown Unreal error")
-                logger.error(f"Unreal fallback error: {error_message}")
-            
-            # Convert to standard error format
-            return {
-                "status": "error",
-                "error": error_message
-            }
-        
-        return response
-        
-    except Exception as e:
-        error_msg = f"Error executing Unreal command '{command_name}': {e}"
-        logger.error(error_msg)
-        return {"status": "error", "error": error_msg}
+                return {"status": "error", "error": response.get("message", "Unknown error")}
 
-# Cache for project info to avoid repeated TCP calls
+        _debug(f"QUEUE [{command_name}] Done, returning response")
+        return response
+
+    finally:
+        # ALWAYS release the lock, even if an exception occurred
+        _request_lock.release()
+        _debug(f"QUEUE [{command_name}] Released lock")
+
+
+# Legacy compatibility
+def get_unreal_engine_connection():
+    """Legacy - not used in simplified version."""
+    return None
+
+def reset_connection():
+    """Legacy - not used in simplified version."""
+    pass
+
+
+# Cache for project info
 _project_info_cache: Dict[str, Any] = {}
 
 def get_project_module_name() -> str:
-    """
-    Get the current Unreal project's module name dynamically.
-
-    This queries Unreal Engine for the project name, which is typically
-    used as the C++ module name (e.g., for /Script/{ModuleName} paths).
-
-    Returns:
-        The project module name, or "MyGame" as fallback if unable to query.
-    """
+    """Get the current Unreal project's module name."""
     global _project_info_cache
 
-    # Return cached value if available
     if "module_name" in _project_info_cache:
         return _project_info_cache["module_name"]
 
@@ -320,29 +204,19 @@ def get_project_module_name() -> str:
             module_name = response["project_name"]
             _project_info_cache["module_name"] = module_name
             _project_info_cache["module_path"] = response.get("module_path", f"/Script/{module_name}")
-            logger.info(f"Retrieved project module name: {module_name}")
             return module_name
     except Exception as e:
-        logger.warning(f"Failed to get project module name from Unreal: {e}")
+        logger.warning(f"Failed to get project module name: {e}")
 
-    # Fallback
-    logger.warning("Using fallback module name 'MyGame'")
     return "MyGame"
 
 
 def get_project_module_path() -> str:
-    """
-    Get the full script module path for the current project.
-
-    Returns:
-        The module path (e.g., "/Script/MyProjectName"), or fallback if unable to query.
-    """
+    """Get the full script module path for the current project."""
     global _project_info_cache
 
-    # Return cached value if available
     if "module_path" in _project_info_cache:
         return _project_info_cache["module_path"]
 
-    # This will populate the cache
     module_name = get_project_module_name()
     return _project_info_cache.get("module_path", f"/Script/{module_name}")
