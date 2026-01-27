@@ -36,12 +36,40 @@ uint32 FMCPServerRunnable::Run()
 {
     UE_LOG(LogTemp, Display, TEXT("MCPServerRunnable: Server thread starting..."));
     
+    // Verify listener socket is valid
+    if (!ListenerSocket.IsValid())
+    {
+        UE_LOG(LogTemp, Error, TEXT("MCPServerRunnable: Listener socket is INVALID! Cannot accept connections."));
+        return 1;
+    }
+    UE_LOG(LogTemp, Display, TEXT("MCPServerRunnable: Listener socket is valid, entering main loop"));
+    
+    int32 LoopCount = 0;
+    double LastHeartbeat = FPlatformTime::Seconds();
+    
     while (bRunning)
     {
-        // UE_LOG(LogTemp, Display, TEXT("MCPServerRunnable: Waiting for client connection..."));
+        LoopCount++;
+        
+        // Periodic heartbeat log every 10 seconds to confirm thread is alive
+        double Now = FPlatformTime::Seconds();
+        if (Now - LastHeartbeat > 10.0)
+        {
+            //UE_LOG(LogTemp, Display, TEXT("MCPServerRunnable: Heartbeat - thread alive, loop count: %d, waiting for connections..."), LoopCount);
+            LastHeartbeat = Now;
+        }
         
         bool bPending = false;
-        if (ListenerSocket->HasPendingConnection(bPending) && bPending)
+        bool bHasPendingResult = ListenerSocket->HasPendingConnection(bPending);
+        
+        // Log first few iterations and any time we detect a pending connection
+        if (LoopCount <= 3 || bPending)
+        {
+            UE_LOG(LogTemp, Display, TEXT("MCPServerRunnable: Loop %d - HasPendingConnection returned: %s, bPending: %s"), 
+                   LoopCount, bHasPendingResult ? TEXT("true") : TEXT("false"), bPending ? TEXT("true") : TEXT("false"));
+        }
+        
+        if (bHasPendingResult && bPending)
         {
             UE_LOG(LogTemp, Display, TEXT("MCPServerRunnable: Client connection pending, accepting..."));
             
@@ -64,6 +92,10 @@ uint32 FMCPServerRunnable::Run()
                 // Set socket options to improve connection stability
                 bool bNoDelayResult = ClientSocket->SetNoDelay(true);
                 UE_LOG(LogTemp, Display, TEXT("MCPServerRunnable: SetNoDelay result: %s"), bNoDelayResult ? TEXT("Success") : TEXT("Failed"));
+
+                // Enable linger to ensure data is sent before socket close (wait up to 2 seconds)
+                bool bLingerResult = ClientSocket->SetLinger(true, 2);
+                UE_LOG(LogTemp, Display, TEXT("MCPServerRunnable: SetLinger result: %s"), bLingerResult ? TEXT("Success") : TEXT("Failed"));
                 
                 int32 SocketBufferSize = 65536;  // 64KB buffer
                 int32 ActualSendBufferSize = 0;
@@ -76,36 +108,43 @@ uint32 FMCPServerRunnable::Run()
                        bSendBufferResult ? TEXT("Success") : TEXT("Failed"), SocketBufferSize, ActualSendBufferSize,
                        bReceiveBufferResult ? TEXT("Success") : TEXT("Failed"), SocketBufferSize, ActualReceiveBufferSize);
                 
-                // Set socket to non-blocking mode for better control
-                bool bNonBlockingResult = ClientSocket->SetNonBlocking(false);
-                UE_LOG(LogTemp, Display, TEXT("MCPServerRunnable: SetNonBlocking(false) result: %s"), bNonBlockingResult ? TEXT("Success") : TEXT("Failed"));
+                // Set socket to NON-BLOCKING mode to prevent indefinite hangs
+                bool bNonBlockingResult = ClientSocket->SetNonBlocking(true);
+                UE_LOG(LogTemp, Display, TEXT("MCPServerRunnable: SetNonBlocking(true) result: %s"), bNonBlockingResult ? TEXT("Success") : TEXT("Failed"));
                 
                 uint8 Buffer[8192];
                 int32 ConnectionAttempts = 0;
                 double ConnectionStartTime = FPlatformTime::Seconds();
+                constexpr double ReceiveTimeoutSeconds = 30.0; // Max time to wait for data
                 
                 while (bRunning)
                 {
+                    // Check for timeout to prevent indefinite blocking
+                    double ElapsedTime = FPlatformTime::Seconds() - ConnectionStartTime;
+                    if (ElapsedTime > ReceiveTimeoutSeconds)
+                    {
+                        UE_LOG(LogTemp, Warning, TEXT("MCPServerRunnable: Receive timeout after %.1f seconds, closing connection"), ElapsedTime);
+                        ClientSocket->Close();
+                        break;
+                    }
+                    
                     ConnectionAttempts++;
                     int32 BytesRead = 0;
                     
-                    // Log connection state before attempting to receive
-                    ESocketConnectionState ConnectionState = ClientSocket->GetConnectionState();
-                    FString ConnectionStateStr;
-                    switch (ConnectionState)
-                    {
-                        case SCS_NotConnected: ConnectionStateStr = TEXT("NotConnected"); break;
-                        case SCS_Connected: ConnectionStateStr = TEXT("Connected"); break;
-                        case SCS_ConnectionError: ConnectionStateStr = TEXT("ConnectionError"); break;
-                        default: ConnectionStateStr = TEXT("Unknown"); break;
-                    }
-                    
-                    // Check for pending data before attempting to receive
+                    // Check for pending data before attempting to receive (non-blocking check)
                     uint32 PendingDataSize = 0;
                     bool bHasPendingData = ClientSocket->HasPendingData(PendingDataSize);
                     
-                    UE_LOG(LogTemp, Display, TEXT("MCPServerRunnable: Attempt %d - ConnectionState: %s, HasPendingData: %s, PendingSize: %d"), 
-                           ConnectionAttempts, *ConnectionStateStr, bHasPendingData ? TEXT("Yes") : TEXT("No"), PendingDataSize);
+                    // If no pending data, sleep briefly and continue to avoid tight loop
+                    if (!bHasPendingData || PendingDataSize == 0)
+                    {
+                        FPlatformProcess::Sleep(0.01f); // 10ms sleep
+                        continue;
+                    }
+                    
+                    // Log only when we have data to reduce spam
+                    UE_LOG(LogTemp, Display, TEXT("MCPServerRunnable: Attempt %d - HasPendingData: Yes, PendingSize: %d"), 
+                           ConnectionAttempts, PendingDataSize);
                     
                     bool bRecvResult = ClientSocket->Recv(Buffer, sizeof(Buffer), BytesRead);
                     
@@ -182,6 +221,16 @@ uint32 FMCPServerRunnable::Run()
                                 else {
                                     UE_LOG(LogTemp, Display, TEXT("MCPServerRunnable: Response sent successfully - %d bytes in %.3f seconds"), BytesSent, SendDuration);
                                 }
+
+                                // Graceful shutdown: signal we're done sending, then wait briefly for client to receive
+                                // This prevents RST being sent before data is ACKed on Windows
+                                ClientSocket->Shutdown(ESocketShutdownMode::Write);
+                                FPlatformProcess::Sleep(0.05f); // 50ms for client to read buffered data
+
+                                // Close connection after response - single request-response model
+                                ClientSocket->Close();
+                                UE_LOG(LogTemp, Display, TEXT("MCPServerRunnable: Connection closed after response"));
+                                break;
                             }
                             else
                             {
@@ -192,6 +241,11 @@ uint32 FMCPServerRunnable::Run()
                                 JsonObject->Values.GetKeys(FieldNames);
                                 FString FieldList = FString::Join(FieldNames, TEXT(", "));
                                 UE_LOG(LogTemp, Warning, TEXT("MCPServerRunnable: Available fields: %s"), *FieldList);
+                                
+                                // Close and break on protocol error - don't hang waiting for more data
+                                ClientSocket->Close();
+                                UE_LOG(LogTemp, Warning, TEXT("MCPServerRunnable: Connection closed due to missing 'type' field"));
+                                break;
                             }
                         }
                         else
@@ -207,6 +261,11 @@ uint32 FMCPServerRunnable::Run()
                             {
                                 UE_LOG(LogTemp, Error, TEXT("MCPServerRunnable: Data doesn't start with '{' - not valid JSON"));
                             }
+                            
+                            // Close and break on parse failure - don't hang waiting for more data
+                            ClientSocket->Close();
+                            UE_LOG(LogTemp, Error, TEXT("MCPServerRunnable: Connection closed due to JSON parse failure"));
+                            break;
                         }
                     }
                     else
@@ -443,4 +502,4 @@ void FMCPServerRunnable::ProcessMessage(TSharedPtr<FSocket> Client, const FStrin
     {
         UE_LOG(LogTemp, Error, TEXT("MCPServerRunnable: Failed to send response"));
     }
-} 
+}
